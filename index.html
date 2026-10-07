@@ -13283,7 +13283,11 @@ async function cloudApiMake(){
     insert:async row=>{const r=await sb.from("saves").insert(row).select("rev,updated_at").single();
       if(r.error&&r.error.code==="23505")return null;return chk(r)},
     update:async(uid,rev,row)=>{const d=chk(await sb.from("saves").update(row).eq("user_id",uid).eq("rev",rev).select("rev,updated_at"));return d&&d[0]||null},
-    setLogin:async(email,password)=>chk(await sb.auth.updateUser({email,password})),
+    /* A new account, not a change to the guest: Supabase always emails to confirm a changed
+       address, but with "Confirm email" off a sign-up is immediate and sends nothing. The
+       save moves with it - the next sync finds no row for the new account and writes this
+       phone's save there. */
+    setLogin:async(email,password)=>{const d=chk(await sb.auth.signUp({email,password}));return{user:d.session?d.user:null}},
     logIn:async(email,password)=>chk(await sb.auth.signInWithPassword({email,password})),
     signOut:async()=>chk(await sb.auth.signOut()),
     onChange:fn=>sb.auth.onAuthStateChange((ev,ss)=>fn(ev,ss?ss.user:null))};
@@ -13377,7 +13381,7 @@ function bindCloud(){
     mk.disabled=true;
     for(let t=0;t<4;t++){const id=pidNew();
       try{const d=await CL.api.setLogin(id.toLowerCase()+"@"+PID_DOMAIN,pw);const u=d&&d.user;
-        if(u&&pidOf(u)){CL.user=u;render();toast("Your player ID is "+pidShow(id)+". Write it down with your password.");return}
+        if(u&&pidOf(u)){CL.user=u;await cloudSync();render();toast("Your player ID is "+pidShow(id)+". Write it down with your password.");return}
         mk.disabled=false;return toast("The server wants to email a confirmation. Turn off “Confirm email” in Supabase first.")}
       catch(e){if(/already|registered|exists/i.test(String(e.message)))continue;
         mk.disabled=false;return toast("Couldn't make the code: "+String(e.message||e).slice(0,70))}}
