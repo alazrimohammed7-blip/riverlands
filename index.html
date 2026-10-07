@@ -1558,6 +1558,7 @@ nav.tabs button .rdot{top:3px;right:calc(50% - 19px)}
 
 /* ===== unlock notices ===== */
 #unlocks{position:absolute;left:50%;top:74px;transform:translateX(-50%);width:min(92%,420px);z-index:40;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.pid{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.06em;color:var(--gilt2)}
 .cconf{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
 .cconf .btn{display:flex;flex-direction:column;align-items:flex-start;gap:4px;text-align:left;padding:12px;height:auto}
 .cconf small{font-size:12px;color:var(--dim);font-weight:400;line-height:1.35}
@@ -13244,8 +13245,9 @@ bind.outskirts=()=>{
 /* ============ CLOUD SAVES ============
    October. One save per player in Supabase (project "riverlands", table public.saves,
    row-level security: a player reads and writes only their own row). Everyone starts as a
-   guest - a real anonymous account - so there is no sign-up wall; adding an email later
-   keeps the same account and the same row, and lets the save be opened on another phone.
+   guest - a real anonymous account - so there is no sign-up wall; adding a login later
+   (the transfer code, below) keeps the same account and the same row, and lets the save be
+   opened on another phone.
 
    The browser copy stays the working save: the game never waits on the network. A save
    marks the copy dirty and a push follows a few seconds later. Each row carries a rev
@@ -13257,12 +13259,7 @@ bind.outskirts=()=>{
    game simply plays with the browser save, as it always has. */
 const CLOUD_URL="https://ymgcasmsheyordjjqzuj.supabase.co";
 const CLOUD_KEY="sb_publishable_ouzPcGxzzy-vcDt9hHrizw_iwGnwVK2";   // publishable: safe in the page, the table's rules do the guarding
-var CL={on:false,quiet:false,api:null,user:null,busy:false,timer:null,state:"off",at:0,err:"",mail:"",sent:"",sentAt:0,linkErr:""};
-/* An email link that failed lands back here with the reason in the address. Read it once
-   and say so, rather than leaving the player wondering why nothing changed. */
-try{const h=new URLSearchParams((location.hash||"").slice(1));
-  if(h.get("error")){CL.linkErr=h.get("error_code")==="otp_expired"?"That link has expired or was replaced by a newer one. Use the newest email, or send a new link.":(h.get("error_description")||"That link didn't work.").replace(/\+/g," ");
-    history.replaceState(null,"",location.pathname+location.search)}}catch(e){}
+var CL={on:false,quiet:false,api:null,user:null,busy:false,timer:null,state:"off",at:0,err:""};
 function cloudWanted(){
   if(window.__cloudApi)return true;                       // tests inject a fake server
   if(window.__noCloud)return false;
@@ -13278,7 +13275,6 @@ async function cloudApiMake(){
   if(window.__cloudApi)return window.__cloudApi;
   const lib=await cloudLib();
   const sb=lib.createClient(CLOUD_URL,CLOUD_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
-  const here=location.origin+location.pathname;
   const chk=({data,error})=>{if(error)throw error;return data};
   return{
     session:async()=>{const d=chk(await sb.auth.getSession());return d.session?d.session.user:null},
@@ -13287,8 +13283,8 @@ async function cloudApiMake(){
     insert:async row=>{const r=await sb.from("saves").insert(row).select("rev,updated_at").single();
       if(r.error&&r.error.code==="23505")return null;return chk(r)},
     update:async(uid,rev,row)=>{const d=chk(await sb.from("saves").update(row).eq("user_id",uid).eq("rev",rev).select("rev,updated_at"));return d&&d[0]||null},
-    linkEmail:async email=>chk(await sb.auth.updateUser({email},{emailRedirectTo:here})),
-    otp:async email=>chk(await sb.auth.signInWithOtp({email,options:{shouldCreateUser:false,emailRedirectTo:here}})),
+    setLogin:async(email,password)=>chk(await sb.auth.updateUser({email,password})),
+    logIn:async(email,password)=>chk(await sb.auth.signInWithPassword({email,password})),
     signOut:async()=>chk(await sb.auth.signOut()),
     onChange:fn=>sb.auth.onAuthStateChange((ev,ss)=>fn(ev,ss?ss.user:null))};
 }
@@ -13347,33 +13343,53 @@ function cloudConflict(row){
   el.querySelector("#ccCloud").onclick=()=>{el.remove();cloudAdopt(row)};
   $("#app").appendChild(el);
 }
+/* The transfer code (October, replacing email): many gacha games do this. The player
+   gets a short player ID and picks a password; on another phone they type both. Under
+   the hood the ID is an address on a domain that cannot receive mail and Supabase's
+   "Confirm email" is off, so nothing is ever sent. A forgotten password cannot be
+   recovered - the panel says so before the player commits. */
+const PID_DOMAIN="players.riverlands.invalid";
+const PID_ABC="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   // no 0/O or 1/I to misread
+function pidNew(){const a=new Uint32Array(8);crypto.getRandomValues(a);return [...a].map(x=>PID_ABC[x%PID_ABC.length]).join("")}
+function pidShow(id){return id.slice(0,4)+"-"+id.slice(4)}
+function pidOf(u){const m=u&&u.email&&u.email.match(/^([a-z0-9]{8})@players\.riverlands\.invalid$/i);return m?m[1].toUpperCase():""}
+function pidClean(t){return String(t||"").toUpperCase().replace(/[^A-Z0-9]/g,"")}
 function cloudPanel(){
   if(!CL.on)return "";
-  const u=CL.user,guest=!u||u.is_anonymous||!u.email;
+  const u=CL.user,pid=pidOf(u),guest=!u||u.is_anonymous||!u.email;
   const st={connecting:"Connecting…",synced:"Saved to the cloud"+(CL.at?" · "+hm(Date.now()-CL.at)+" ago":""),offline:"Offline — saved on this phone, will sync when back",conflict:"Waiting for you to pick a save"}[CL.state]||"";
   return `<section class="sec panel"><h3>Account</h3>
-    <p style="font-size:13px;margin:0 0 6px">${guest?"Playing as a <b>guest</b>.":`Signed in as <b>${esc(u.email)}</b>.`} <span class="faint">${esc(st)}</span></p>
-    ${CL.linkErr?`<p style="font-size:12.5px;color:var(--red,#e57373);margin:0 0 6px">${esc(CL.linkErr)}</p>`:""}
-    ${guest&&CL.sent?`<p style="font-size:12.5px;margin:0 0 6px">Link sent to <b>${esc(CL.sent)}</b>. Open the <b>newest</b> email and tap the link on this device. Each new link cancels the one before.</p>`:""}
-    ${guest?`<p class="faint" style="font-size:12.5px">Add your email to keep this save if you change phones. We'll send a link to confirm it.</p>
-      <div class="row"><input type="email" id="acMail" placeholder="you@example.com" aria-label="Email" value="${esc(CL.mail)}" style="flex:1;min-width:0">
-        <button class="btn sm gold" id="acLink"${Date.now()-CL.sentAt<60000?" disabled":""}>${CL.sent?"Send again":"Keep my save"}</button></div>
-      <p class="faint" style="font-size:12.5px;margin-top:10px">Already saved on another phone? <button class="btn sm" id="acIn">Sign in with email</button></p>`
-    :`<div class="row"><button class="btn sm" id="acSync">Sync now</button><button class="btn sm ghost" id="acOut">Sign out</button></div>`}
+    <p style="font-size:13px;margin:0 0 6px">${guest?"Playing as a <b>guest</b>.":pid?`Player ID <b class="pid">${pidShow(pid)}</b>`:`Signed in as <b>${esc(u.email)}</b>.`} <span class="faint">${esc(st)}</span></p>
+    ${guest?`<p class="faint" style="font-size:12.5px">Make a transfer code to keep this save if you change phones: you get a player ID and choose a password. Write both down — a lost password can't be recovered.</p>
+      <div class="row"><input type="password" id="acPw" placeholder="Choose a password (8+)" autocomplete="new-password" aria-label="Choose a password" style="flex:1;min-width:0">
+        <button class="btn sm gold" id="acMake">Make my code</button></div>
+      <p class="faint" style="font-size:12.5px;margin:12px 0 4px">Have a code from another phone?</p>
+      <div class="row"><input type="text" id="acId" placeholder="Player ID" autocapitalize="characters" aria-label="Player ID" style="width:8.5em">
+        <input type="password" id="acPw2" placeholder="Password" autocomplete="current-password" aria-label="Password" style="flex:1;min-width:0">
+        <button class="btn sm" id="acIn">Load it</button></div>`
+    :`<p class="faint" style="font-size:12.5px">On another phone, open Settings → Account and type this ID with your password.</p>
+      <div class="row"><button class="btn sm" id="acSync">Sync now</button><button class="btn sm ghost" id="acOut">Sign out</button></div>`}
   </section>`;
 }
 function bindCloud(){
-  const m=$("#acMail");if(m)m.oninput=e=>{CL.mail=e.target.value.trim()};
-  const mail=()=>{const v=(CL.mail||"").trim();if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)){toast("That email doesn't look right.");return""}return v};
-  const l=$("#acLink");if(l)l.onclick=async()=>{const v=mail();if(!v)return;
-    l.disabled=true;
-    try{await CL.api.linkEmail(v);CL.sent=v;CL.sentAt=Date.now();CL.linkErr="";render();toast("Check your inbox and tap the link to confirm.");
-      setTimeout(()=>{if(tab==="settings")render()},61000)}
-    catch(e){l.disabled=false;toast(/rate|seconds/i.test(String(e.message))?"An email was sent a moment ago. Check your inbox, or wait a minute.":"Couldn't send: "+String(e.message||e).slice(0,60))}};
-  const i=$("#acIn");if(i)i.onclick=async()=>{const v=mail();if(!v)return;
-    try{await CL.api.otp(v);toast("Check your inbox and tap the sign-in link on this phone.")}catch(e){toast("No account with that email yet. Add it from the phone that has your save.")}};
+  const mk=$("#acMake");if(mk)mk.onclick=async()=>{
+    const pw=($("#acPw")||{}).value||"";if(pw.length<8)return toast("Use at least 8 characters.");
+    mk.disabled=true;
+    for(let t=0;t<4;t++){const id=pidNew();
+      try{const d=await CL.api.setLogin(id.toLowerCase()+"@"+PID_DOMAIN,pw);const u=d&&d.user;
+        if(u&&pidOf(u)){CL.user=u;render();toast("Your player ID is "+pidShow(id)+". Write it down with your password.");return}
+        mk.disabled=false;return toast("The server wants to email a confirmation. Turn off “Confirm email” in Supabase first.")}
+      catch(e){if(/already|registered|exists/i.test(String(e.message)))continue;
+        mk.disabled=false;return toast("Couldn't make the code: "+String(e.message||e).slice(0,70))}}
+    mk.disabled=false;toast("Couldn't find a free ID. Try again.")};
+  const i=$("#acIn");if(i)i.onclick=async()=>{
+    const id=pidClean(($("#acId")||{}).value),pw=($("#acPw2")||{}).value||"";
+    if(id.length!==8)return toast("A player ID is 8 letters and numbers.");if(!pw)return toast("Type the password.");
+    i.disabled=true;
+    try{const d=await CL.api.logIn(id.toLowerCase()+"@"+PID_DOMAIN,pw);if(d&&d.user){CL.user=d.user;await cloudSync();render();toast("Loaded player "+pidShow(id)+".")}}
+    catch(e){i.disabled=false;toast(/invalid|credentials/i.test(String(e.message))?"That ID and password don't match.":"Couldn't sign in: "+String(e.message||e).slice(0,60))}};
   const y=$("#acSync");if(y)y.onclick=()=>cloudSync();
-  const o=$("#acOut");if(o)o.onclick=()=>confirmSheet("Sign out?","This phone keeps a copy and carries on as a new guest. Your cloud save stays safe under your email.","Sign out",async()=>{
+  const o=$("#acOut");if(o)o.onclick=()=>confirmSheet("Sign out?","This phone keeps a copy and carries on as a new guest. Your save stays safe under your player ID and password.","Sign out",async()=>{
     try{await CL.api.signOut()}catch(e){}CL.quiet=true;try{S.cloud=null;save()}finally{CL.quiet=false}CL.user=null;CL.state="connecting";
     try{CL.user=await CL.api.anon();await cloudSync()}catch(e){CL.state="offline"}render()});
 }
